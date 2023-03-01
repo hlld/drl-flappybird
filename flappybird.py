@@ -11,12 +11,14 @@ class FlappyBird(object):
                  screen_height=512,
                  screen_width=288,
                  pipe_gap_size=100,
-                 fps=30):
+                 fps=30,
+                 mute=True):
         self._data_root = data_root
         self._screen_height = screen_height
         self._screen_width = screen_width
         self._pipe_gap_size = pipe_gap_size
         self._fps = fps
+        self._mute = mute
         self._rt = {}
         self._init_game()
         self._reset_env()
@@ -199,14 +201,16 @@ class FlappyBird(object):
             if self._rt['player_y'] > -2 * self._rt['player_h']:
                 self._rt['player_velocity_y'] = self._rt['player_flap_acceleration']
                 self._rt['player_flapped'] = True
-                sounds['wing'].play()
+                if not self._mute:
+                    sounds['wing'].play()
 
         player_mid_pos = self._rt['player_x'] + self._rt['player_w'] / 2
         for pipe in self._rt['upper_pipes']:
             pipe_mid_pos = pipe['x'] + self._rt['pipe_w'] / 2
             if pipe_mid_pos <= player_mid_pos < pipe_mid_pos + 4:
                 self._rt['score'] += 1
-                sounds['point'].play()
+                if not self._mute:
+                    sounds['point'].play()
                 reward = 1
 
         if (self._rt['loop_iter'] + 1) % 3 == 0:
@@ -239,8 +243,9 @@ class FlappyBird(object):
 
         is_crash = self.check_crash()
         if is_crash:
-            sounds['hit'].play()
-            sounds['die'].play()
+            if not self._mute:
+                sounds['hit'].play()
+                sounds['die'].play()
             terminal = True
             self._reset_env()
             reward = -1
