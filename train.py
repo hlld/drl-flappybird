@@ -1,4 +1,5 @@
 import argparse
+import os
 import random
 import numpy as np
 import cv2
@@ -6,12 +7,13 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from collections import deque
+from copy import deepcopy
 from flappybird import FlappyBird
 
 
-class DQN(nn.Module):
+class DQNNet(nn.Module):
     def __init__(self, in_channels, num_actions):
-        super(DQN, self).__init__()
+        super(DQNNet, self).__init__()
         self.stem = nn.Sequential(*[
             self.make_conv_block(in_channels, 32, kernel_size=7, stride=4),
             nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
@@ -44,11 +46,11 @@ class DQN(nn.Module):
 class Trainer(object):
     def __init__(self, **kargs):
         self.device = torch.device(kargs['device'])
-        model = DQN(4, kargs['num_actions'])
+        model = DQNNet(4, kargs['num_actions'])
         self.model = model.to(self.device).train()
         self.optimizer = optim.Adam(model.parameters(), lr=kargs['learning_rate'])
         self.game = FlappyBird(kargs['media_path'])
-        self.kargs = kargs
+        self.attrs = kargs
 
     @staticmethod
     def convert_image(image, output_size=(80, 80)):
@@ -59,45 +61,85 @@ class Trainer(object):
         return image_gray.transpose((2, 0, 1))[None, :, :, :]
 
     def train_network(self):
-        do_nothing = np.zeros(self.kargs['num_actions'])
+        do_nothing = np.zeros(self.attrs['num_actions'])
         do_nothing[0] = 1
         image_raw, reward_t, terminal = self.game.frame_step(do_nothing)
         image_gray = self.convert_image(image_raw)
         state_t = np.tile(image_gray, (1, 4, 1, 1))
+        action_t = np.zeros(self.attrs['num_actions'])
         replay_memory = deque()
-        epsilon = self.kargs['initial_epsilon']
+        epsilon = self.attrs['initial_epsilon']
         time_steps = 0
 
-        total_steps = self.kargs['observe_steps'] + self.kargs['explore_steps']
+        total_steps = self.attrs['observe_steps'] + self.attrs['explore_steps']
         while time_steps < total_steps:
-            inputs = torch.from_numpy(state_t).to(self.device, non_blocking=True).float()
-            with torch.no_grad():
-                outputs = self.model(inputs).cpu().numpy()
-            action_t = np.zeros(self.kargs['num_actions'])
-            if time_steps % self.kargs['frame_per_action']:
+            if time_steps % self.attrs['frame_per_action']:
                 if random.random() <= epsilon:
-                    action_index = random.randrange(self.kargs['num_actions'])
+                    action_index = random.randrange(self.attrs['num_actions'])
                     action_t[action_index] = 1
                 else:
-                    action_index = np.argmax(outputs, axis=1)
+                    inputs = torch.from_numpy(state_t).to(self.device, non_blocking=True).float()
+                    self.model.eval()
+                    with torch.no_grad():
+                        outputs = self.model(inputs).cpu().numpy()
+                    action_index = np.argmax(outputs[0], axis=0)
                     action_t[action_index] = 1
             else:
-                action_t[0] = 1
+                action_index = 0
+                action_t[action_index] = 1
 
-            if epsilon > self.kargs['final_epsilon'] \
-                    and time_steps > self.kargs['observe_steps']:
-                epsilon_range = self.kargs['initial_epsilon'] - self.kargs['final_epsilon']
-                epsilon -= epsilon_range / self.kargs['explore_steps']
+            if epsilon > self.attrs['final_epsilon'] \
+                    and time_steps > self.attrs['observe_steps']:
+                epsilon_range = self.attrs['initial_epsilon'] - self.attrs['final_epsilon']
+                epsilon -= epsilon_range / self.attrs['explore_steps']
 
             image_raw, reward_t, terminal = self.game.frame_step(action_t)
             image_gray = self.convert_image(image_raw)
-            new_state_t = np.concatenate([image_gray, state_t[:, :3, :, :]], axis=1)
-            replay_memory.append((state_t, action_t, reward_t, new_state_t, terminal))
-            if len(replay_memory) > self.kargs['replay_memory_size']:
+            state_t1 = np.concatenate([image_gray, state_t[:, :3, :, :]], axis=1)
+            replay_memory.append((state_t, action_t, reward_t, state_t1, terminal))
+            if len(replay_memory) > self.attrs['replay_memory_size']:
                 replay_memory.popleft()
 
-            state_t = new_state_t
+            if time_steps > self.attrs['observe_steps']:
+                mini_batch = random.sample(replay_memory, self.attrs['batch_size'])
+                state_t_batch = np.concatenate([x[0] for x in mini_batch], axis=0)
+                action_t_batch = np.concatenate([x[1][None, :] for x in mini_batch], axis=0)
+                reward_t_batch = [x[2] for x in mini_batch]
+                state_t1_batch = np.concatenate([x[3] for x in mini_batch], axis=0)
+
+                inputs = torch.from_numpy(state_t1_batch).to(self.device, non_blocking=True).float()
+                self.model.eval()
+                with torch.no_grad():
+                    outputs = self.model(inputs).cpu().numpy()
+                true_batch = []
+                for batch_index in range(len(mini_batch)):
+                    terminal = mini_batch[batch_index][4]
+                    if terminal:
+                        true_batch.append(reward_t_batch[batch_index])
+                    else:
+                        increment = self.attrs['decay_rate_gamma'] * np.max(outputs[batch_index])
+                        true_batch.append(reward_t_batch[batch_index] + increment)
+
+                inputs = torch.from_numpy(state_t_batch).to(self.device, non_blocking=True).float()
+                true_batch = torch.from_numpy(np.array(true_batch)).to(self.device).float()
+                action_t_batch = torch.from_numpy(action_t_batch).to(self.device).float()
+                self.model.train()
+                outputs = self.model(inputs)
+                loss = (true_batch - (outputs * action_t_batch).sum(dim=1)).square().mean(dim=0)
+                loss.backward()
+                self.optimizer.step()
+                self.optimizer.zero_grad()
+
+            state_t = state_t1
             time_steps += 1
+            if time_steps % 10000 == 0:
+                ckpt_path = os.path.join(self.attrs['output_path'], 'dqnnet.pt')
+                saved_ckpt = {'model': deepcopy(self.model).half(),
+                              'optimizer': self.optimizer.state_dict()}
+                torch.save(saved_ckpt, ckpt_path)
+                del saved_ckpt
+            print('TIMESTEP:', time_steps, 'EPSILON:', epsilon,
+                  'ACTION:', action_index, 'REWARD:', reward_t)
 
 
 def main():
@@ -130,19 +172,20 @@ def main():
                         help='frame per action')
     opt = parser.parse_args()
 
-    Trainer(output_path=opt.output_path,
-            media_path=opt.media_path,
-            learning_rate=opt.learning_rate,
-            batch_size=opt.batch_size,
-            device=opt.device,
-            num_actions=opt.num_actions,
-            decay_rate_gamma=opt.decay_rate_gamma,
-            observe_steps=opt.observe_steps,
-            explore_steps=opt.explore_steps,
-            initial_epsilon=opt.initial_epsilon,
-            final_epsilon=opt.final_epsilon,
-            replay_memory_size=opt.replay_memory_size,
-            frame_per_action=opt.frame_per_action).train_network()
+    trainer = Trainer(output_path=opt.output_path,
+                      media_path=opt.media_path,
+                      learning_rate=opt.learning_rate,
+                      batch_size=opt.batch_size,
+                      device=opt.device,
+                      num_actions=opt.num_actions,
+                      decay_rate_gamma=opt.decay_rate_gamma,
+                      observe_steps=opt.observe_steps,
+                      explore_steps=opt.explore_steps,
+                      initial_epsilon=opt.initial_epsilon,
+                      final_epsilon=opt.final_epsilon,
+                      replay_memory_size=opt.replay_memory_size,
+                      frame_per_action=opt.frame_per_action)
+    trainer.train_network()
 
 
 if __name__ == '__main__':
