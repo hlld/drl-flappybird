@@ -1,6 +1,7 @@
 import argparse
 import os
 import random
+import math
 import numpy as np
 import cv2
 import torch
@@ -24,6 +25,7 @@ class DQNNet(nn.Module):
             nn.Linear(1600, 512),
             nn.Linear(512, num_actions),
         ])
+        self._initialize_weights()
 
     def forward(self, x):
         x = self.stem(x)
@@ -41,6 +43,20 @@ class DQNNet(nn.Module):
             nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding=padding),
             nn.ReLU(inplace=True),
         ])
+
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+                m.weight.data.normal_(0, math.sqrt(2.0 / n))
+                if m.bias is not None:
+                    m.bias.data.zero_()
+            elif isinstance(m, nn.BatchNorm2d):
+                m.weight.data.fill_(1.0)
+                m.bias.data.zero_()
+            elif isinstance(m, nn.Linear):
+                m.weight.data.normal_(0, 0.01)
+                m.bias.data.zero_()
 
 
 class Trainer(object):
@@ -151,7 +167,7 @@ def main():
                         help='number of actions')
     parser.add_argument('--decay_rate_gamma', type=float, default=0.99,
                         help='decay rate gamma')
-    parser.add_argument('--observe_steps', type=int, default=100000,
+    parser.add_argument('--observe_steps', type=int, default=10000,
                         help='steps of observe stage')
     parser.add_argument('--explore_steps', type=int, default=2000000,
                         help='steps of observe stage')
