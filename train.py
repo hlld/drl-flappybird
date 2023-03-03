@@ -80,7 +80,7 @@ class Trainer(object):
                     inputs = torch.from_numpy(state_t).to(self.device, non_blocking=True).float()
                     with torch.no_grad():
                         outputs = self.model.eval()(inputs).cpu().numpy()
-                    action_index = np.argmax(outputs[0], axis=0)
+                    action_index = np.argmax(outputs[0])
                     action_t[action_index] = 1
             else:
                 action_index = 0
@@ -119,7 +119,7 @@ class Trainer(object):
                 true_batch = torch.from_numpy(np.array(true_batch)).to(self.device).float()
                 action_t_batch = torch.from_numpy(action_t_batch).to(self.device).float()
                 outputs = self.model.train()(inputs)
-                loss = (true_batch - (outputs * action_t_batch).sum(dim=1)).square().mean(dim=0)
+                loss = (true_batch - (outputs * action_t_batch).sum(dim=1)).square().mean()
                 loss.backward()
                 self.optimizer.step()
                 self.optimizer.zero_grad()
@@ -141,7 +141,7 @@ def main():
                         help='path to save outputs')
     parser.add_argument('--media_path', type=str, default='./media',
                         help='media path')
-    parser.add_argument('--learning_rate', type=float, default=1e-3,
+    parser.add_argument('--learning_rate', type=float, default=1e-6,
                         help='learning rate')
     parser.add_argument('--batch_size', type=int, default=32,
                         help='batch size')
@@ -164,21 +164,7 @@ def main():
     parser.add_argument('--frame_per_action', type=int, default=1,
                         help='frame per action')
     opt = parser.parse_args()
-
-    trainer = Trainer(output_path=opt.output_path,
-                      media_path=opt.media_path,
-                      learning_rate=opt.learning_rate,
-                      batch_size=opt.batch_size,
-                      device=opt.device,
-                      num_actions=opt.num_actions,
-                      decay_rate_gamma=opt.decay_rate_gamma,
-                      observe_steps=opt.observe_steps,
-                      explore_steps=opt.explore_steps,
-                      initial_epsilon=opt.initial_epsilon,
-                      final_epsilon=opt.final_epsilon,
-                      replay_memory_size=opt.replay_memory_size,
-                      frame_per_action=opt.frame_per_action)
-    trainer.train_network()
+    Trainer(**vars(opt)).train_network()
 
 
 if __name__ == '__main__':
