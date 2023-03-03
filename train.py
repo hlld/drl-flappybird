@@ -53,7 +53,7 @@ class Trainer(object):
         self.attrs = kargs
 
     @staticmethod
-    def convert_image(image, output_size=(80, 80)):
+    def preprocess(image, output_size=(80, 80)):
         image = cv2.resize(image, output_size)
         image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         image_gray = cv2.threshold(image_gray, 1, 255, cv2.THRESH_BINARY)[1]
@@ -64,38 +64,34 @@ class Trainer(object):
         do_nothing = np.zeros(self.attrs['num_actions'])
         do_nothing[0] = 1
         image_raw, reward_t, terminal = self.game.frame_step(do_nothing)
-        image_gray = self.convert_image(image_raw)
-        state_t = np.tile(image_gray, (1, 4, 1, 1))
-        action_t = np.zeros(self.attrs['num_actions'])
+        state_t = np.tile(self.preprocess(image_raw), (1, 4, 1, 1))
         replay_memory = deque()
         epsilon = self.attrs['initial_epsilon']
         time_steps = 0
 
         total_steps = self.attrs['observe_steps'] + self.attrs['explore_steps']
         while time_steps < total_steps:
-            if time_steps % self.attrs['frame_per_action']:
+            action_t = np.zeros(self.attrs['num_actions'])
+            if time_steps % self.attrs['frame_per_action'] == 0:
                 if random.random() <= epsilon:
                     action_index = random.randrange(self.attrs['num_actions'])
                     action_t[action_index] = 1
                 else:
                     inputs = torch.from_numpy(state_t).to(self.device, non_blocking=True).float()
-                    self.model.eval()
                     with torch.no_grad():
-                        outputs = self.model(inputs).cpu().numpy()
+                        outputs = self.model.eval()(inputs).cpu().numpy()
                     action_index = np.argmax(outputs[0], axis=0)
                     action_t[action_index] = 1
             else:
                 action_index = 0
                 action_t[action_index] = 1
 
-            if epsilon > self.attrs['final_epsilon'] \
-                    and time_steps > self.attrs['observe_steps']:
+            if epsilon > self.attrs['final_epsilon'] and time_steps > self.attrs['observe_steps']:
                 epsilon_range = self.attrs['initial_epsilon'] - self.attrs['final_epsilon']
                 epsilon -= epsilon_range / self.attrs['explore_steps']
 
             image_raw, reward_t, terminal = self.game.frame_step(action_t)
-            image_gray = self.convert_image(image_raw)
-            state_t1 = np.concatenate([image_gray, state_t[:, :3, :, :]], axis=1)
+            state_t1 = np.concatenate([self.preprocess(image_raw), state_t[:, :3, :, :]], axis=1)
             replay_memory.append((state_t, action_t, reward_t, state_t1, terminal))
             if len(replay_memory) > self.attrs['replay_memory_size']:
                 replay_memory.popleft()
@@ -108,9 +104,8 @@ class Trainer(object):
                 state_t1_batch = np.concatenate([x[3] for x in mini_batch], axis=0)
 
                 inputs = torch.from_numpy(state_t1_batch).to(self.device, non_blocking=True).float()
-                self.model.eval()
                 with torch.no_grad():
-                    outputs = self.model(inputs).cpu().numpy()
+                    outputs = self.model.eval()(inputs).cpu().numpy()
                 true_batch = []
                 for batch_index in range(len(mini_batch)):
                     terminal = mini_batch[batch_index][4]
@@ -123,8 +118,7 @@ class Trainer(object):
                 inputs = torch.from_numpy(state_t_batch).to(self.device, non_blocking=True).float()
                 true_batch = torch.from_numpy(np.array(true_batch)).to(self.device).float()
                 action_t_batch = torch.from_numpy(action_t_batch).to(self.device).float()
-                self.model.train()
-                outputs = self.model(inputs)
+                outputs = self.model.train()(inputs)
                 loss = (true_batch - (outputs * action_t_batch).sum(dim=1)).square().mean(dim=0)
                 loss.backward()
                 self.optimizer.step()
@@ -137,7 +131,6 @@ class Trainer(object):
                 saved_ckpt = {'model': deepcopy(self.model).half(),
                               'optimizer': self.optimizer.state_dict()}
                 torch.save(saved_ckpt, ckpt_path)
-                del saved_ckpt
             print('TIMESTEP:', time_steps, 'EPSILON:', epsilon,
                   'ACTION:', action_index, 'REWARD:', reward_t)
 
@@ -148,7 +141,7 @@ def main():
                         help='path to save outputs')
     parser.add_argument('--media_path', type=str, default='./media',
                         help='media path')
-    parser.add_argument('--learning_rate', type=float, default=1e-6,
+    parser.add_argument('--learning_rate', type=float, default=1e-3,
                         help='learning rate')
     parser.add_argument('--batch_size', type=int, default=32,
                         help='batch size')
@@ -162,9 +155,9 @@ def main():
                         help='steps of observe stage')
     parser.add_argument('--explore_steps', type=int, default=2000000,
                         help='steps of observe stage')
-    parser.add_argument('--initial_epsilon', type=float, default=0.0001,
+    parser.add_argument('--initial_epsilon', type=float, default=0.1,
                         help='initial epsilon')
-    parser.add_argument('--final_epsilon', type=float, default=0.0001,
+    parser.add_argument('--final_epsilon', type=float, default=0.001,
                         help='final epsilon')
     parser.add_argument('--replay_memory_size', type=int, default=50000,
                         help='size of replay memory')
