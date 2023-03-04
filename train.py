@@ -65,6 +65,10 @@ class Trainer(object):
         model = DQNNet(4, kargs['num_actions'])
         self.model = model.to(self.device).train()
         self.optimizer = optim.Adam(model.parameters(), lr=kargs['learning_rate'])
+        if kargs['weights']:
+            ckpt = torch.load(kargs['weights'], map_location=self.device)
+            model.load_state_dict(ckpt['model'].float().state_dict())
+            self.optimizer.load_state_dict(ckpt['optimizer'])
         self.game = FlappyBird(kargs['media_path'])
         self.attrs = kargs
 
@@ -81,7 +85,7 @@ class Trainer(object):
         do_nothing[0] = 1
         image_raw, reward_t, terminal = self.game.frame_step(do_nothing)
         state_t = np.tile(self.preprocess(image_raw), (1, 4, 1, 1))
-        replay_memory = deque()
+        replay_d = deque()
         epsilon = self.attrs['initial_epsilon']
         time_steps = 0
 
@@ -108,12 +112,12 @@ class Trainer(object):
 
             image_raw, reward_t, terminal = self.game.frame_step(action_t)
             state_t1 = np.concatenate([self.preprocess(image_raw), state_t[:, :3, :, :]], axis=1)
-            replay_memory.append((state_t, action_t, reward_t, state_t1, terminal))
-            if len(replay_memory) > self.attrs['replay_memory_size']:
-                replay_memory.popleft()
+            replay_d.append((state_t, action_t, reward_t, state_t1, terminal))
+            if len(replay_d) > self.attrs['replay_memory_size']:
+                replay_d.popleft()
 
             if time_steps > self.attrs['observe_steps']:
-                mini_batch = random.sample(replay_memory, self.attrs['batch_size'])
+                mini_batch = random.sample(replay_d, self.attrs['batch_size'])
                 state_t_batch = np.concatenate([x[0] for x in mini_batch], axis=0)
                 action_t_batch = np.concatenate([x[1][None, :] for x in mini_batch], axis=0)
                 reward_t_batch = [x[2] for x in mini_batch]
@@ -157,6 +161,8 @@ def main():
                         help='path to save outputs')
     parser.add_argument('--media_path', type=str, default='./media',
                         help='media path')
+    parser.add_argument('--weights', type=str, default='',
+                        help='path to model weights')
     parser.add_argument('--learning_rate', type=float, default=1e-6,
                         help='learning rate')
     parser.add_argument('--batch_size', type=int, default=32,
@@ -167,13 +173,13 @@ def main():
                         help='number of actions')
     parser.add_argument('--decay_rate_gamma', type=float, default=0.99,
                         help='decay rate gamma')
-    parser.add_argument('--observe_steps', type=int, default=10000,
+    parser.add_argument('--observe_steps', type=int, default=50000,
                         help='steps of observe stage')
     parser.add_argument('--explore_steps', type=int, default=2000000,
                         help='steps of observe stage')
     parser.add_argument('--initial_epsilon', type=float, default=0.1,
                         help='initial epsilon')
-    parser.add_argument('--final_epsilon', type=float, default=0.001,
+    parser.add_argument('--final_epsilon', type=float, default=0,
                         help='final epsilon')
     parser.add_argument('--replay_memory_size', type=int, default=50000,
                         help='size of replay memory')
