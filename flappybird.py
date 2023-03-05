@@ -261,8 +261,8 @@ class FlappyBird(object):
         screen.blit(images['player'][self._rt['player_index']],
                     (self._rt['player_x'], self._rt['player_y']))
 
-        image_data = pygame.surfarray.array3d(pygame.display.get_surface())
+        image_raw = pygame.surfarray.array3d(pygame.display.get_surface())
         pygame.display.update()
 
         self._rt['fps_lock'].tick(self._fps)
-        return image_data, reward, terminal
+        return image_raw, reward, terminal

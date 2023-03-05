@@ -1,62 +1,21 @@
 import argparse
 import os
 import random
-import math
 import numpy as np
 import cv2
 import torch
-import torch.nn as nn
 import torch.optim as optim
 from collections import deque
-from copy import deepcopy
+from dqnnet import DQNNet
 from flappybird import FlappyBird
 
 
-class DQNNet(nn.Module):
-    def __init__(self, in_channels, num_actions):
-        super(DQNNet, self).__init__()
-        self.stem = nn.Sequential(*[
-            self.make_conv_block(in_channels, 32, kernel_size=7, stride=4),
-            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
-            self.make_conv_block(32, 64, kernel_size=5, stride=2),
-            self.make_conv_block(64, 64, kernel_size=3, stride=1),
-        ])
-        self.head = nn.Sequential(*[
-            nn.Linear(1600, 512),
-            nn.Linear(512, num_actions),
-        ])
-        self._initialize_weights()
-
-    def forward(self, x):
-        x = self.stem(x)
-        x = x.flatten(start_dim=1, end_dim=-1)
-        return self.head(x)
-
-    @staticmethod
-    def make_conv_block(in_channels,
-                        out_channels,
-                        kernel_size,
-                        stride,
-                        padding=None):
-        padding = kernel_size // 2 if padding is None else padding
-        return nn.Sequential(*[
-            nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding=padding),
-            nn.ReLU(inplace=True),
-        ])
-
-    def _initialize_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
-                m.weight.data.normal_(0, math.sqrt(2.0 / n))
-                if m.bias is not None:
-                    m.bias.data.zero_()
-            elif isinstance(m, nn.BatchNorm2d):
-                m.weight.data.fill_(1.0)
-                m.bias.data.zero_()
-            elif isinstance(m, nn.Linear):
-                m.weight.data.normal_(0, 0.01)
-                m.bias.data.zero_()
+def preprocess(image, output_size=(80, 80)):
+    image = cv2.resize(image, output_size)
+    image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    image_gray = cv2.threshold(image_gray, 1, 255, cv2.THRESH_BINARY)[1]
+    image_gray = image_gray.reshape(output_size[0], output_size[1], 1)
+    return image_gray.transpose((2, 0, 1))[None, :, :, :]
 
 
 class Trainer(object):
@@ -66,58 +25,47 @@ class Trainer(object):
         self.model = model.to(self.device).train()
         self.optimizer = optim.Adam(model.parameters(), lr=kargs['learning_rate'])
         if kargs['weights']:
-            ckpt = torch.load(kargs['weights'], map_location=self.device)
-            model.load_state_dict(ckpt['model'].float().state_dict())
-            self.optimizer.load_state_dict(ckpt['optimizer'])
+            state_dict = torch.load(kargs['weights'], map_location=self.device)
+            model.load_state_dict(state_dict)
         self.game = FlappyBird(kargs['media_path'])
-        self.attrs = kargs
-
-    @staticmethod
-    def preprocess(image, output_size=(80, 80)):
-        image = cv2.resize(image, output_size)
-        image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        image_gray = cv2.threshold(image_gray, 1, 255, cv2.THRESH_BINARY)[1]
-        image_gray = image_gray.reshape(output_size[0], output_size[1], 1)
-        return image_gray.transpose((2, 0, 1))[None, :, :, :]
+        self.rt = kargs
 
     def train_network(self):
-        do_nothing = np.zeros(self.attrs['num_actions'])
+        do_nothing = np.zeros(self.rt['num_actions'])
         do_nothing[0] = 1
         image_raw, reward_t, terminal = self.game.frame_step(do_nothing)
-        state_t = np.tile(self.preprocess(image_raw), (1, 4, 1, 1))
+        state_t = np.tile(preprocess(image_raw), (1, 4, 1, 1))
         replay_d = deque()
-        epsilon = self.attrs['initial_epsilon']
+        epsilon = self.rt['initial_epsilon']
         time_steps = 0
 
-        total_steps = self.attrs['observe_steps'] + self.attrs['explore_steps']
+        total_steps = self.rt['observe_steps'] + self.rt['explore_steps']
         while time_steps < total_steps:
-            action_t = np.zeros(self.attrs['num_actions'])
-            if time_steps % self.attrs['frame_per_action'] == 0:
+            action_t = np.zeros(self.rt['num_actions'])
+            if time_steps % self.rt['frame_per_action'] == 0:
                 if random.random() <= epsilon:
-                    action_index = random.randrange(self.attrs['num_actions'])
-                    action_t[action_index] = 1
+                    action_index = random.randrange(self.rt['num_actions'])
                 else:
                     inputs = torch.from_numpy(state_t).to(self.device, non_blocking=True).float()
                     with torch.no_grad():
                         outputs = self.model.eval()(inputs).cpu().numpy()
                     action_index = np.argmax(outputs[0])
-                    action_t[action_index] = 1
             else:
                 action_index = 0
-                action_t[action_index] = 1
+            action_t[action_index] = 1
 
-            if epsilon > self.attrs['final_epsilon'] and time_steps > self.attrs['observe_steps']:
-                epsilon_range = self.attrs['initial_epsilon'] - self.attrs['final_epsilon']
-                epsilon -= epsilon_range / self.attrs['explore_steps']
+            if epsilon > self.rt['final_epsilon'] and time_steps > self.rt['observe_steps']:
+                epsilon_range = self.rt['initial_epsilon'] - self.rt['final_epsilon']
+                epsilon -= epsilon_range / self.rt['explore_steps']
 
             image_raw, reward_t, terminal = self.game.frame_step(action_t)
-            state_t1 = np.concatenate([self.preprocess(image_raw), state_t[:, :3, :, :]], axis=1)
+            state_t1 = np.concatenate([preprocess(image_raw), state_t[:, :3, :, :]], axis=1)
             replay_d.append((state_t, action_t, reward_t, state_t1, terminal))
-            if len(replay_d) > self.attrs['replay_memory_size']:
+            if len(replay_d) > self.rt['replay_memory_size']:
                 replay_d.popleft()
 
-            if time_steps > self.attrs['observe_steps']:
-                mini_batch = random.sample(replay_d, self.attrs['batch_size'])
+            if time_steps > self.rt['observe_steps']:
+                mini_batch = random.sample(replay_d, self.rt['batch_size'])
                 state_t_batch = np.concatenate([x[0] for x in mini_batch], axis=0)
                 action_t_batch = np.concatenate([x[1][None, :] for x in mini_batch], axis=0)
                 reward_t_batch = [x[2] for x in mini_batch]
@@ -132,7 +80,7 @@ class Trainer(object):
                     if terminal:
                         true_batch.append(reward_t_batch[batch_index])
                     else:
-                        increment = self.attrs['decay_rate_gamma'] * np.max(outputs[batch_index])
+                        increment = self.rt['decay_rate_gamma'] * np.max(outputs[batch_index])
                         true_batch.append(reward_t_batch[batch_index] + increment)
 
                 inputs = torch.from_numpy(state_t_batch).to(self.device, non_blocking=True).float()
@@ -146,11 +94,9 @@ class Trainer(object):
 
             state_t = state_t1
             time_steps += 1
-            if time_steps % 10000 == 0:
-                ckpt_path = os.path.join(self.attrs['output_path'], 'dqnnet.pt')
-                saved_ckpt = {'model': deepcopy(self.model).half(),
-                              'optimizer': self.optimizer.state_dict()}
-                torch.save(saved_ckpt, ckpt_path)
+            if time_steps % 1000 == 0:
+                ckpt_path = os.path.join(self.rt['output_path'], 'dqnnet.pt')
+                torch.save(self.model.state_dict(), ckpt_path)
             print('TIMESTEP:', time_steps, 'EPSILON:', epsilon,
                   'ACTION:', action_index, 'REWARD:', reward_t)
 
@@ -167,7 +113,7 @@ def main():
                         help='learning rate')
     parser.add_argument('--batch_size', type=int, default=32,
                         help='batch size')
-    parser.add_argument('--device', type=str, default='cuda:0',
+    parser.add_argument('--device', type=str, default='cpu',
                         help='torch device')
     parser.add_argument('--num_actions', type=int, default=2,
                         help='number of actions')
